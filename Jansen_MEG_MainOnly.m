@@ -4,7 +4,7 @@
 clear; clc; close all;
 rng(1,'twister');              % reproducible multi-start experiment
 delete(gcp("nocreate"));
-parpool;
+parpool('local', 16);  % adjust to your CPU core count
 
 %% 1. Settings
 fit_mode = 'joint_jP';
@@ -92,17 +92,17 @@ sim.X0 = [0.05; 8; 1; 0; 0; 0];
 opts_mstart = optimoptions('lsqnonlin', 'Display', 'off', 'MaxIterations', 80, ...
     'MaxFunctionEvaluations', 800);
 
-% 定義測試的初始參數網格
-test_j_seeds = linspace(10, 14, 40); 
-test_P_seeds = linspace(-2.0, 6, 80);
+% 定義測試的初始參數網格 (設為 10x10 網格，共 100 個測試點)
+test_j_seeds = linspace(12.4, 12.8, 10); 
+test_P_seeds = linspace(2.0, 3.5, 10);
 [J_GRID, P_GRID] = meshgrid(test_j_seeds, test_P_seeds);
 
-% 為了使用 parfor，將 2D 網格攤平成 1D 陣列
+% 將 2D 網格攤平成 1D 陣列以利 parfor 分配工作
 num_points = numel(J_GRID);
 J_GRID_flat = J_GRID(:);
 P_GRID_flat = P_GRID(:);
 
-% 預先配置 1D 結果陣列
+% 預先配置結果陣列
 J_OPT_flat = zeros(num_points, 1);
 P_OPT_flat = zeros(num_points, 1);
 COST_flat  = zeros(num_points, 1);
@@ -113,8 +113,17 @@ obj_fun = @(theta_var) jansen_residual_weighted( ...
 
 fprintf('\n=== 開始平行測試初始參數相依性 (共 %d 個點) ===\n', num_points);
 
-% 啟動 CPU 平行運算池 (如果尚未啟動，MATLAB 會自動啟動)
-% 使用 parfor 取代傳統的 for 迴圈
+% 1. 建立彈出式視覺化進度條
+h_wait = waitbar(0, '準備啟動平行運算池 (可能需要幾秒鐘)...');
+D = parallel.pool.DataQueue;
+
+% 確保進度計數器歸零
+clear update_waitbar; 
+
+% 2. 綁定進度條更新函數
+afterEach(D, @(~) update_waitbar(h_wait, num_points));
+
+% 啟動平行運算迴圈
 parfor i = 1:num_points
     theta0_var = [J_GRID_flat(i), P_GRID_flat(i)];
     
@@ -123,51 +132,78 @@ parfor i = 1:num_points
         J_OPT_flat(i) = theta_opt_var(1);
         P_OPT_flat(i) = theta_opt_var(2);
         COST_flat(i)  = resnorm;
-        
-        % 在 parfor 中列印進度 (注意：列印順序可能會因為平行運算而交錯)
-        fprintf('完成點位: 起點 (j=%.2f, P=%.2f) -> 終點 (j=%.4f, P=%.4f), Cost=%.4f\n', ...
-                J_GRID_flat(i), P_GRID_flat(i), theta_opt_var(1), theta_opt_var(2), resnorm);
     catch
         J_OPT_flat(i) = NaN; 
         P_OPT_flat(i) = NaN; 
         COST_flat(i)  = NaN;
-        fprintf('點位 (j=%.2f, P=%.2f) 最佳化失敗\n', J_GRID_flat(i), P_GRID_flat(i));
     end
+    
+    % 3. 單一任務完成時，發送訊號更新進度條
+    send(D, i);
 end
 
-% 將 1D 結果還原回與原網格相同的 2D 矩陣形狀
+% 運算結束，自動關閉進度條視窗
+if isvalid(h_wait), close(h_wait); end
+
+% 將 1D 結果還原回 2D 矩陣形狀
 J_OPT_RES = reshape(J_OPT_flat, size(J_GRID));
 P_OPT_RES = reshape(P_OPT_flat, size(P_GRID));
-COST_RES  = reshape(COST_flat, size(J_GRID));
 
-% === 額外輸出：收斂軌跡向量圖 ===
+% 統計收斂點與自動設定最佳參數
+% 過濾掉計算失敗 (NaN) 的點
+valid_idx = ~isnan(COST_flat);
+J_valid = J_OPT_flat(valid_idx);
+P_valid = P_OPT_flat(valid_idx);
+C_valid = COST_flat(valid_idx);
+
+% 四捨五入到小數點後 4 位，將微小差異歸類為同一個收斂點
+JP_rounded = round([J_valid, P_valid], 4);
+[uJP, ~, ic] = unique(JP_rounded, 'rows');
+counts = accumarray(ic, 1);
+
+% 依照收斂點數量由多到少進行排序
+[counts_sorted, sort_idx] = sort(counts, 'descend');
+uJP_sorted = uJP(sort_idx, :);
+
+fprintf('\n=== 收斂點統計 ===\n');
+for k = 1:size(uJP_sorted, 1)
+    fprintf('P%d (%.4f, %.4f): %d 個點\n', k, uJP_sorted(k,1), uJP_sorted(k,2), counts_sorted(k));
+end
+
+% 自動找出全域最低 Cost 的點
+[min_cost, min_idx] = min(C_valid);
+best_j = J_valid(min_idx);
+best_P = P_valid(min_idx);
+
+fprintf('\n=== 最佳化目標更新 ===\n');
+fprintf('全域最低 Cost = %.4f，位於 (j=%.4f, P=%.4f)\n', min_cost, best_j, best_P);
+fprintf('已將此點自動設定為後續 P scan 與診斷圖表的目標參數。\n');
+
+% 重新計算最佳參數的物理參數與動態資訊 (供後續區塊使用)
+[best_C, best_p] = paperToDimensional(best_j, best_P, basePar);
+[~, best_info] = jansen_residual_weighted( ...
+    [best_j, best_P], basePar, sim, ...
+    t_exp, y_data, data_features, fs, f_target, f_scale, weights, n_lock, m_lock);
+
+% 額外輸出：收斂軌跡向量圖
 figure('Color','w', 'Name', 'Initial Parameter Dependence');
 hold on;
-% 畫出收斂向量 (從起始點指向最佳化結果)
+% 畫出收斂向量
 quiver(J_GRID, P_GRID, J_OPT_RES - J_GRID, P_OPT_RES - P_GRID, 0, ...
     'Color', [0.6 0.6 0.6], 'MaxHeadSize', 0.5, 'LineWidth', 1);
-% 標示起始點與終點
-scatter(J_GRID(:), P_GRID(:), 30, 'b', 'filled', 'MarkerEdgeColor', 'k');
-scatter(J_OPT_RES(:), P_OPT_RES(:), 60, 'r', 'p', 'filled', 'MarkerEdgeColor', 'k');
+% 標示起始點與收斂終點
+scatter(J_GRID(:), P_GRID(:), 20, 'b', 'filled', 'MarkerEdgeColor', 'k');
+scatter(uJP_sorted(:,1), uJP_sorted(:,2), 80, 'r', 'p', 'filled', 'MarkerEdgeColor', 'k');
+% 特別標示全域最佳解
+scatter(best_j, best_P, 150, 'y', 'p', 'filled', 'MarkerEdgeColor', 'k', 'LineWidth', 1.5);
+
 xlabel('Connectivity Parameter (j)');
 ylabel('External Input (P)');
 title('Convergence from Different Initial Seeds');
-legend('Convergence Path', 'Initial Seeds', 'Optimized Parameters', 'Location', 'best');
-grid on;
-box on;
+legend('Convergence Path', 'Initial Seeds', 'Local Minima', 'Global Best Minimum', 'Location', 'best');
+grid on; box on;
 
 %% 6. P scan
-
-best_j = 12.5384;
-best_P = 2.6933;
-
-% 將無因次參數 (j, P) 轉換回實體參數 (C, p)，供後續模擬使用
-[best_C, best_p] = paperToDimensional(best_j, best_P, basePar);
-
-% 針對這組參數重新計算誤差與詳細動態資訊 (best_info 供第 9 區塊繪圖使用)
-[best_residual, best_info] = jansen_residual_weighted( ...
-    [best_j, best_P], basePar, sim, ...
-    t_exp, y_data, data_features, fs, f_target, f_scale, weights, n_lock, m_lock);
 
 best_cost = sum(best_residual.^2);
 
@@ -759,14 +795,18 @@ if toc(t_start) > timeout
 end
 end
 
-function updateProgressWrapper(total_pts)
-% 供 DataQueue 使用的非同步進度更新函數
+function update_waitbar(h, total_points)
+    % 使用 persistent 變數記住目前的進度
     persistent count;
-    if isempty(count) || count == total_pts
+    if isempty(count)
         count = 0;
     end
     count = count + 1;
     
-    % 在命令視窗輸出進度 (例如 1/25)
-    fprintf('平行最佳化進度: %d / %d\n', count, total_pts);
+    % 強制更新 UI 進度條與文字
+    if isvalid(h)
+        progress_msg = sprintf('平行運算進度: [%d/%d] 已完成', count, total_points);
+        waitbar(count / total_points, h, progress_msg);
+        drawnow; % 強制立即刷新畫面
+    end
 end
