@@ -3,6 +3,8 @@
 % Main multi-start optimization is retained; post-fit initialization tests are removed.
 clear; clc; close all;
 rng(1,'twister');              % reproducible multi-start experiment
+delete(gcp("nocreate"));
+parpool;
 
 %% 1. Settings
 fit_mode = 'joint_jP';
@@ -86,47 +88,89 @@ sim.AbsTol = 1e-8;
 sim.MaxStep = min(1e-2, 1/fs);
 sim.X0 = [0.05; 8; 1; 0; 0; 0];
 
-%% 5. Main optimization
+%% 5. Initial Parameter Dependence Test
 opts_mstart = optimoptions('lsqnonlin', 'Display', 'off', 'MaxIterations', 80, ...
     'MaxFunctionEvaluations', 800);
-best_cost = Inf;
-best_theta = [];
-best_info = [];
+
+% 定義測試的初始參數網格
+test_j_seeds = linspace(10, 14, 40); 
+test_P_seeds = linspace(-2.0, 6, 80);
+[J_GRID, P_GRID] = meshgrid(test_j_seeds, test_P_seeds);
+
+% 為了使用 parfor，將 2D 網格攤平成 1D 陣列
+num_points = numel(J_GRID);
+J_GRID_flat = J_GRID(:);
+P_GRID_flat = P_GRID(:);
+
+% 預先配置 1D 結果陣列
+J_OPT_flat = zeros(num_points, 1);
+P_OPT_flat = zeros(num_points, 1);
+COST_flat  = zeros(num_points, 1);
+
 obj_fun = @(theta_var) jansen_residual_weighted( ...
     apply_fixed_params(theta_var,fixed_paper_params),basePar,sim, ...
     t_exp, y_data, data_features, fs, f_target, f_scale, weights, n_lock, m_lock);
-for k = 1:num_starts
-    if k == 1
-        theta0_var = theta_seed_var;
-    else
-        theta0_var = lb_var + (ub_var-lb_var).*rand(1,sum(var_idx));
-    end
+
+fprintf('\n=== 開始平行測試初始參數相依性 (共 %d 個點) ===\n', num_points);
+
+% 啟動 CPU 平行運算池 (如果尚未啟動，MATLAB 會自動啟動)
+% 使用 parfor 取代傳統的 for 迴圈
+parfor i = 1:num_points
+    theta0_var = [J_GRID_flat(i), P_GRID_flat(i)];
+    
     try
-        [theta_opt_var, resnorm] = lsqnonlin( obj_fun,theta0_var,lb_var,ub_var,opts_mstart);
-        theta_opt = apply_fixed_params( theta_opt_var,fixed_paper_params);
-        [~, info] = jansen_residual_weighted( theta_opt, basePar, sim, ...
-            t_exp, y_data, data_features, fs, f_target, f_scale, weights, n_lock, m_lock);
-        if info.is_valid_fit && isfinite(resnorm) && resnorm < best_cost
-            best_cost = resnorm;
-            best_theta = theta_opt;
-            best_info = info;
-        end
-        fprintf(['  [start %2d/%2d] Cost = %.6f | best = %.6f ', ...
-                 '| j=%.4f P=%.4f | C=%.3f p=%.3f\n'], k, num_starts, resnorm, best_cost, ...
-            theta_opt(1),theta_opt(2),info.C,info.p);
-    catch ME
-        fprintf('  [start %2d/%2d] optimization failed: %s\n', k, num_starts, ME.message);
+        [theta_opt_var, resnorm] = lsqnonlin(obj_fun, theta0_var, lb_var, ub_var, opts_mstart);
+        J_OPT_flat(i) = theta_opt_var(1);
+        P_OPT_flat(i) = theta_opt_var(2);
+        COST_flat(i)  = resnorm;
+        
+        % 在 parfor 中列印進度 (注意：列印順序可能會因為平行運算而交錯)
+        fprintf('完成點位: 起點 (j=%.2f, P=%.2f) -> 終點 (j=%.4f, P=%.4f), Cost=%.4f\n', ...
+                J_GRID_flat(i), P_GRID_flat(i), theta_opt_var(1), theta_opt_var(2), resnorm);
+    catch
+        J_OPT_flat(i) = NaN; 
+        P_OPT_flat(i) = NaN; 
+        COST_flat(i)  = NaN;
+        fprintf('點位 (j=%.2f, P=%.2f) 最佳化失敗\n', J_GRID_flat(i), P_GRID_flat(i));
     end
 end
-if isempty(best_theta)
-    error(['Multi-start optimization did not find a valid solution. ', ...
-           'Check parameter bounds, initial condition, or integration settings.']);
-end
-best_j = best_theta(1);
-best_P = best_theta(2);
-[best_C,best_p] = paperToDimensional( best_j,best_P,basePar);
+
+% 將 1D 結果還原回與原網格相同的 2D 矩陣形狀
+J_OPT_RES = reshape(J_OPT_flat, size(J_GRID));
+P_OPT_RES = reshape(P_OPT_flat, size(P_GRID));
+COST_RES  = reshape(COST_flat, size(J_GRID));
+
+% === 額外輸出：收斂軌跡向量圖 ===
+figure('Color','w', 'Name', 'Initial Parameter Dependence');
+hold on;
+% 畫出收斂向量 (從起始點指向最佳化結果)
+quiver(J_GRID, P_GRID, J_OPT_RES - J_GRID, P_OPT_RES - P_GRID, 0, ...
+    'Color', [0.6 0.6 0.6], 'MaxHeadSize', 0.5, 'LineWidth', 1);
+% 標示起始點與終點
+scatter(J_GRID(:), P_GRID(:), 30, 'b', 'filled', 'MarkerEdgeColor', 'k');
+scatter(J_OPT_RES(:), P_OPT_RES(:), 60, 'r', 'p', 'filled', 'MarkerEdgeColor', 'k');
+xlabel('Connectivity Parameter (j)');
+ylabel('External Input (P)');
+title('Convergence from Different Initial Seeds');
+legend('Convergence Path', 'Initial Seeds', 'Optimized Parameters', 'Location', 'best');
+grid on;
+box on;
 
 %% 6. P scan
+
+best_j = 12.5384;
+best_P = 2.6933;
+
+% 將無因次參數 (j, P) 轉換回實體參數 (C, p)，供後續模擬使用
+[best_C, best_p] = paperToDimensional(best_j, best_P, basePar);
+
+% 針對這組參數重新計算誤差與詳細動態資訊 (best_info 供第 9 區塊繪圖使用)
+[best_residual, best_info] = jansen_residual_weighted( ...
+    [best_j, best_P], basePar, sim, ...
+    t_exp, y_data, data_features, fs, f_target, f_scale, weights, n_lock, m_lock);
+
+best_cost = sum(best_residual.^2);
+
 N_grid = 81;
 P_grid = linspace(lb(2),ub(2),N_grid);
 scan_cost = nan(N_grid,1);
@@ -134,7 +178,7 @@ valid_fit_profile = false(N_grid,1);
 f_raw_profile = nan(N_grid,1);
 f_filtered_profile = nan(N_grid,1);
 R_profile = nan(N_grid,1);
-for i = 1:N_grid
+parfor i = 1:N_grid
     theta_scan = [best_j,P_grid(i)];
     try
         [residual_scan,info_scan] = jansen_residual_weighted( theta_scan,basePar,sim, ...
@@ -713,4 +757,16 @@ end
 if toc(t_start) > timeout
     status = 1;
 end
+end
+
+function updateProgressWrapper(total_pts)
+% 供 DataQueue 使用的非同步進度更新函數
+    persistent count;
+    if isempty(count) || count == total_pts
+        count = 0;
+    end
+    count = count + 1;
+    
+    % 在命令視窗輸出進度 (例如 1/25)
+    fprintf('平行最佳化進度: %d / %d\n', count, total_pts);
 end
