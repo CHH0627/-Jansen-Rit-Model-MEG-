@@ -9,9 +9,9 @@ parpool('local', 16);  % adjust to your CPU core count
 %% 1. Settings
 fit_mode = 'joint_jP';
 fixed_j = 14.00;
-paper_j_bounds = [12.48, 12.60];
-paper_P_bounds = [ 2.66,  2.73];
-paper_seed = [12.5400, 2.6997];   % [j,P], previous data-priority optimum
+paper_j_bounds = [10, 14];
+paper_P_bounds = [-4, 4];
+paper_seed = [12.5338, 2.6901];   % [j,P], previous data-priority optimum
 require_sustained_oscillation = true;
 
 %% 2. MEG data
@@ -93,8 +93,8 @@ opts_mstart = optimoptions('lsqnonlin', 'Display', 'off', 'MaxIterations', 80, .
     'MaxFunctionEvaluations', 800);
 
 % 定義測試的初始參數網格
-test_j_seeds = linspace(10, 14, 40); 
-test_P_seeds = linspace(-4, 4, 80);
+test_j_seeds = linspace(10, 14, 20); 
+test_P_seeds = linspace(-4, 4, 40);
 [J_GRID, P_GRID] = meshgrid(test_j_seeds, test_P_seeds);
 
 % 將 2D 網格攤平成 1D 陣列以利 parfor 分配工作
@@ -204,8 +204,6 @@ legend('Convergence Path', 'Initial Seeds', 'Local Minima', 'Global Best Minimum
 grid on; box on;
 
 %% 6. P scan
-
-best_cost = sum(best_residual.^2);
 
 N_grid = 81;
 P_grid = linspace(lb(2),ub(2),N_grid);
