@@ -92,9 +92,9 @@ sim.X0 = [0.05; 8; 1; 0; 0; 0];
 opts_mstart = optimoptions('lsqnonlin', 'Display', 'off', 'MaxIterations', 80, ...
     'MaxFunctionEvaluations', 800);
 
-% 定義測試的初始參數網格 (設為 10x10 網格，共 100 個測試點)
-test_j_seeds = linspace(12.4, 12.8, 10); 
-test_P_seeds = linspace(2.0, 3.5, 10);
+% 定義測試的初始參數網格
+test_j_seeds = linspace(10, 14, 40); 
+test_P_seeds = linspace(-4, 4, 80);
 [J_GRID, P_GRID] = meshgrid(test_j_seeds, test_P_seeds);
 
 % 將 2D 網格攤平成 1D 陣列以利 parfor 分配工作
