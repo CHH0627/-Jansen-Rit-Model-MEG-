@@ -9,8 +9,8 @@ parpool('local', 16);  % adjust to your CPU core count
 %% 1. Settings
 fit_mode = 'joint_jP';
 fixed_j = 14.00;
-paper_j_bounds = [12.10, 100];
-paper_P_bounds = [2.00, 100];
+paper_j_bounds = [-100, 100];
+paper_P_bounds = [-100, 100];
 paper_seed = [12.5338, 2.6901];   % [j,P], previous data-priority optimum
 require_sustained_oscillation = true;
 
