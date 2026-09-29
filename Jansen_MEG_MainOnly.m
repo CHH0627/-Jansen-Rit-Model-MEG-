@@ -9,8 +9,8 @@ parpool('local', 16);  % adjust to your CPU core count
 %% 1. Settings
 fit_mode = 'joint_jP';
 fixed_j = 14.00;
-paper_j_bounds = [10, 18];
-paper_P_bounds = [-4, 6];
+paper_j_bounds = [12.10, 100];
+paper_P_bounds = [2.00, 100];
 paper_seed = [12.5338, 2.6901];   % [j,P], previous data-priority optimum
 require_sustained_oscillation = true;
 
@@ -93,8 +93,8 @@ opts_mstart = optimoptions('lsqnonlin', 'Display', 'off', 'MaxIterations', 80, .
     'MaxFunctionEvaluations', 800);
 
 % 定義測試的初始參數網格
-test_j_seeds = linspace(17, 17.5, 50); 
-test_P_seeds = linspace(2.5, 2.7, 20);
+test_j_seeds = linspace(12.10, 13, 25); 
+test_P_seeds = linspace(2, 3, 50);
 [J_GRID, P_GRID] = meshgrid(test_j_seeds, test_P_seeds);
 
 % 將 2D 網格攤平成 1D 陣列以利 parfor 分配工作
@@ -144,6 +144,15 @@ end
 
 % 運算結束，自動關閉進度條視窗
 if isvalid(h_wait), close(h_wait); end
+
+% 建立資料表 (Table)
+results_table = table(J_GRID_flat, P_GRID_flat, J_OPT_flat, P_OPT_flat, COST_flat, ...
+    'VariableNames', {'j_Initial', 'P_Initial', 'j_Optimized', 'P_Optimized', 'Cost'});
+
+% 設定輸出的檔案名稱並寫入
+csv_filename = 'GridSearch_Optimization_Results.csv';
+writetable(results_table, csv_filename);
+fprintf('\n=== 已成功將 %d 個網格點的搜尋結果匯出至 %s ===\n', num_points, csv_filename);
 
 % 將 1D 結果還原回 2D 矩陣形狀
 J_OPT_RES = reshape(J_OPT_flat, size(J_GRID));
