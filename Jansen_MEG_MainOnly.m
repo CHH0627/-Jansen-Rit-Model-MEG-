@@ -9,8 +9,8 @@ parpool('local', 16);  % adjust to your CPU core count
 %% 1. Settings
 fit_mode = 'joint_jP';
 fixed_j = 14.00;
-paper_j_bounds = [10, 14];
-paper_P_bounds = [-4, 4];
+paper_j_bounds = [10, 18];
+paper_P_bounds = [-4, 6];
 paper_seed = [12.5338, 2.6901];   % [j,P], previous data-priority optimum
 require_sustained_oscillation = true;
 
@@ -237,7 +237,7 @@ if any(valid_scan)
     [~,local_min_index] = min(scan_cost(valid_scan));
     grid_min_index = valid_indices(local_min_index);
 else
-    J_min = best_cost;
+    J_min = min_cost;
     grid_min_index = NaN;
 end
 relative_tolerance = 0.05;
@@ -295,7 +295,7 @@ plot(t_exp,y_fit,'b','LineWidth',1.1);
 legend('Target data (MEG)','Jansen fit','Location','best');
 xlabel('Time (s)');
 ylabel('Normalized amplitude');
-title(sprintf('Waveform Fit: J_{new} = %.6f',best_cost));
+title(sprintf('Waveform Fit: J_{new} = %.6f',min_cost));
 grid on;
 
 % B. Corrected wrapped phase difference
