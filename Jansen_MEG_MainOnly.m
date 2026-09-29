@@ -9,8 +9,8 @@ parpool('local', 16);  % adjust to your CPU core count
 %% 1. Settings
 fit_mode = 'joint_jP';
 fixed_j = 14.00;
-paper_j_bounds = [12.10, 100];
-paper_P_bounds = [2.00, 100];
+paper_j_bounds = [-100, 100];
+paper_P_bounds = [-100, 100];
 paper_seed = [12.5338, 2.6901];   % [j,P], previous data-priority optimum
 require_sustained_oscillation = true;
 
@@ -93,8 +93,8 @@ opts_mstart = optimoptions('lsqnonlin', 'Display', 'off', 'MaxIterations', 80, .
     'MaxFunctionEvaluations', 800);
 
 % 定義測試的初始參數網格
-test_j_seeds = linspace(12.10, 13, 25); 
-test_P_seeds = linspace(2, 3, 50);
+test_j_seeds = linspace(12.10, 14, 10);
+test_P_seeds = linspace(1.98, 10, 10);
 [J_GRID, P_GRID] = meshgrid(test_j_seeds, test_P_seeds);
 
 % 將 2D 網格攤平成 1D 陣列以利 parfor 分配工作
@@ -472,7 +472,7 @@ phi_fit = fit_features.phase;
 phase_diff = n_lock*phi_data - m_lock*phi_fit;
 R = abs(mean(exp(1i*wrap_pi(phase_diff))));
 R = min(max(real(R),0),1);
-r_phase = sqrt(weights.phase*max(0,1-R));
+r_phase = sqrt(weights.phase) * (1 - R)^2 * 10;
 E_theta = 1-R;
 r = [r_waveform; r_envelope; r_psd; r_freq; r_phase];
 info.R = R;
