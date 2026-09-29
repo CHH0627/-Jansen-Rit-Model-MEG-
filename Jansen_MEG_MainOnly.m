@@ -474,7 +474,18 @@ R = abs(mean(exp(1i*wrap_pi(phase_diff))));
 R = min(max(real(R),0),1);
 r_phase = sqrt(weights.phase*max(0,1-R));
 E_theta = 1-R;
-r = [r_waveform; r_envelope; r_psd; r_freq; r_phase];
+
+% 1. 計算瞬時頻率 (相位的時間微分)
+inst_freq_data = diff(unwrap(phi_data));
+inst_freq_fit  = diff(unwrap(phi_fit));
+
+% 2. 計算瞬時頻率的殘差 (給予一個適當的權重係數)
+r_inst_freq = sqrt(weights.phase * 0.5) * (inst_freq_data - inst_freq_fit);
+
+% 3. 將新的約束加入最終的殘差向量中
+% 原本：r = [r_waveform; r_envelope; r_psd; r_freq; r_phase];
+r = [r_waveform; r_envelope; r_psd; r_freq; r_phase; r_inst_freq];
+
 info.R = R;
 info.is_valid_fit = true;
 info.f_dom = f_dom_raw;
