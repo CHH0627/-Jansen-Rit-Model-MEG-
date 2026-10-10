@@ -88,128 +88,157 @@ sim.AbsTol = 1e-8;
 sim.MaxStep = min(1e-2, 1/fs);
 sim.X0 = [0.05; 8; 1; 0; 0; 0];
 
-%% 5. Initial Parameter Dependence Test
+%% 5. 流形軌跡追蹤測試 (Manifold Tracer via Iterative Grid Search)
 opts_mstart = optimoptions('lsqnonlin', 'Display', 'off', 'MaxIterations', 80, ...
     'MaxFunctionEvaluations', 800);
 
-% 定義測試的初始參數網格
-test_j_seeds = linspace(12.10, 14, 10); 
-test_P_seeds = linspace(1.98, 10, 10);
-[J_GRID, P_GRID] = meshgrid(test_j_seeds, test_P_seeds);
+% --- 演算法參數設定 ---
+N_iters = 10;                  % 迭代次數 N (可自行設定)
+grid_step = 0.0001;             % 網格步長
+grid_range = -5:5;             % i 的範圍 (-5 到 5，共 11x11 = 121 個點)
+num_grid_points = length(grid_range)^2;
 
-% 將 2D 網格攤平成 1D 陣列以利 parfor 分配工作
-num_points = numel(J_GRID);
-J_GRID_flat = J_GRID(:);
-P_GRID_flat = P_GRID(:);
+% 初始點 P1
+current_center = [12.5338, 2.6901]; 
 
-% 預先配置結果陣列
-J_OPT_flat = zeros(num_points, 1);
-P_OPT_flat = zeros(num_points, 1);
-COST_flat  = zeros(num_points, 1);
+% 用於儲存歷史軌跡與所有探索過的點 (供繪製 Manifold 使用)
+center_history = zeros(N_iters + 1, 2);
+center_history(1, :) = current_center;
+cost_history = zeros(N_iters + 1, 1);
+
+% 儲存所有灑點的最佳化結果以繪製散佈圖
+ALL_J_OPT = [];
+ALL_P_OPT = [];
+ALL_COST  = [];
 
 obj_fun = @(theta_var) jansen_residual_weighted( ...
     apply_fixed_params(theta_var,fixed_paper_params),basePar,sim, ...
     t_exp, y_data, data_features, fs, f_target, f_scale, weights, n_lock, m_lock);
 
-fprintf('\n=== 開始平行測試初始參數相依性 (共 %d 個點) ===\n', num_points);
+fprintf('\n=== 開始流形軌跡追蹤 (共 %d 次迭代，每次 %d 個點) ===\n', N_iters, num_grid_points);
 
-% 1. 建立彈出式視覺化進度條
-h_wait = waitbar(0, '準備啟動平行運算池 (可能需要幾秒鐘)...');
+% 建立進度條
+h_wait = waitbar(0, '正在沿著 Manifold 尋找最佳解...');
 D = parallel.pool.DataQueue;
+clear update_waitbar_tracer; 
+afterEach(D, @(~) update_waitbar_tracer(h_wait, N_iters * num_grid_points));
 
-% 確保進度計數器歸零
-clear update_waitbar; 
+% 在進入迭代前，抓取這次執行腳本的當下時間，作為區分不同次執行的標籤
+run_timestamp = string(datetime('now', 'Format', 'yyyy-MM-dd HH:mm:ss')); 
 
-% 2. 綁定進度條更新函數
-afterEach(D, @(~) update_waitbar(h_wait, num_points));
-
-% 啟動平行運算迴圈
-parfor i = 1:num_points
-    theta0_var = [J_GRID_flat(i), P_GRID_flat(i)];
+% 開始 N 次迭代
+for iter = 1:N_iters
+    fprintf('第 %d/%d 次迭代，當前中心: (j=%.4f, P=%.4f)，當前成本: %.4f\n', iter, N_iters, current_center(1), current_center(2), cost_history(iter + 1));
     
-    try
-        [theta_opt_var, resnorm] = lsqnonlin(obj_fun, theta0_var, lb_var, ub_var, opts_mstart);
-        J_OPT_flat(i) = theta_opt_var(1);
-        P_OPT_flat(i) = theta_opt_var(2);
-        COST_flat(i)  = resnorm;
-    catch
-        J_OPT_flat(i) = NaN; 
-        P_OPT_flat(i) = NaN; 
-        COST_flat(i)  = NaN;
+    % 1. 在當前中心建立 11x11 微小網格
+    [dj, dP] = meshgrid(grid_range * grid_step, grid_range * grid_step);
+    J_seeds = current_center(1) + dj(:);
+    P_seeds = current_center(2) + dP(:);
+    
+    % 暫存當次迭代的結果
+    iter_J_opt = zeros(num_grid_points, 1);
+    iter_P_opt = zeros(num_grid_points, 1);
+    iter_Cost  = zeros(num_grid_points, 1);
+    
+    % 2. 使用 parfor 平行最佳化這 121 個點
+    parfor k = 1:num_grid_points
+        theta0_var = [J_seeds(k), P_seeds(k)];
+        try
+            [theta_opt, resnorm] = lsqnonlin(obj_fun, theta0_var, lb_var, ub_var, opts_mstart);
+            iter_J_opt(k) = theta_opt(1);
+            iter_P_opt(k) = theta_opt(2);
+            iter_Cost(k)  = resnorm;
+        catch
+            iter_J_opt(k) = NaN; iter_P_opt(k) = NaN; iter_Cost(k) = NaN;
+        end
+        send(D, 1); % 更新進度條
     end
     
-    % 3. 單一任務完成時，發送訊號更新進度條
-    send(D, i);
+    % =====================================================================
+    % 3. 將當次迭代的所有點匯出並附加到 CSV 檔案 (Append Mode)
+    % =====================================================================
+    % 建立與數據點數量相同的迭代次數與時間陣列
+    iter_array = repmat(iter, num_grid_points, 1);
+    time_array = repmat(run_timestamp, num_grid_points, 1);
+    
+    % 建立資料表 (Table)，包含所有要求輸出的數據
+    iter_table = table(time_array, iter_array, J_seeds, P_seeds, iter_J_opt, iter_P_opt, iter_Cost, ...
+        'VariableNames', {'RunTime', 'Iteration', 'j_Initial', 'P_Initial', 'j_Optimized', 'P_Optimized', 'Cost'});
+    
+    csv_filename = 'Manifold_Tracer_Results.csv';
+    
+    % 偵測檔案是否存在：不存在就新建(自動寫入標題)，存在就以附加模式(Append)寫在舊資料下方
+    if exist(csv_filename, 'file')
+        writetable(iter_table, csv_filename, 'WriteMode', 'append');
+    else
+        writetable(iter_table, csv_filename);
+    end
+    % =====================================================================
+    
+    % 紀錄所有點，用於最後 MATLAB 繪圖
+    ALL_J_OPT = [ALL_J_OPT; iter_J_opt];
+    ALL_P_OPT = [ALL_P_OPT; iter_P_opt];
+    ALL_COST  = [ALL_COST; iter_Cost];
+    
+    % 4. 尋找當次迭代中 Cost 最小的點作為下一次的 P2 中心
+    valid_idx = ~isnan(iter_Cost) & (iter_Cost < 1000); % 濾除無效/被懲罰的點
+    
+    
+    if any(valid_idx)
+        valid_costs = iter_Cost(valid_idx);
+        valid_J = iter_J_opt(valid_idx);
+        valid_P = iter_P_opt(valid_idx);
+        
+        [min_c, min_idx] = min(valid_costs);
+        next_center = [valid_J(min_idx), valid_P(min_idx)];
+        
+        % 更新中心點與歷史紀錄
+        current_center = next_center;
+        center_history(iter + 1, :) = current_center;
+        cost_history(iter + 1) = min_c;
+    else
+        fprintf('警告: 第 %d 次迭代的所有點皆落入懲罰區，提早終止。\n', iter);
+        center_history(iter+1:end, :) = [];
+        break;
+    end
 end
 
-% 運算結束，自動關閉進度條視窗
 if isvalid(h_wait), close(h_wait); end
 
-% 建立資料表 (Table)
-results_table = table(J_GRID_flat, P_GRID_flat, J_OPT_flat, P_OPT_flat, COST_flat, ...
-    'VariableNames', {'j_Initial', 'P_Initial', 'j_Optimized', 'P_Optimized', 'Cost'});
+% 5.1 設定最終最佳化目標
+best_j = center_history(end, 1);
+best_P = center_history(end, 2);
+min_cost = cost_history(end);
 
-% 設定輸出的檔案名稱並寫入
-csv_filename = 'GridSearch_Optimization_Results.csv';
-writetable(results_table, csv_filename);
-fprintf('\n=== 已成功將 %d 個網格點的搜尋結果匯出至 %s ===\n', num_points, csv_filename);
+fprintf('\n=== 流形追蹤完成 ===\n');
+fprintf('最終收斂點位於 (j=%.4f, P=%.4f), Cost = %.4f\n', best_j, best_P, min_cost);
 
-% 將 1D 結果還原回 2D 矩陣形狀
-J_OPT_RES = reshape(J_OPT_flat, size(J_GRID));
-P_OPT_RES = reshape(P_OPT_flat, size(P_GRID));
-
-% 統計收斂點與自動設定最佳參數
-% 過濾掉計算失敗 (NaN) 的點
-valid_idx = ~isnan(COST_flat);
-J_valid = J_OPT_flat(valid_idx);
-P_valid = P_OPT_flat(valid_idx);
-C_valid = COST_flat(valid_idx);
-
-% 四捨五入到小數點後 4 位，將微小差異歸類為同一個收斂點
-JP_rounded = round([J_valid, P_valid], 4);
-[uJP, ~, ic] = unique(JP_rounded, 'rows');
-counts = accumarray(ic, 1);
-
-% 依照收斂點數量由多到少進行排序
-[counts_sorted, sort_idx] = sort(counts, 'descend');
-uJP_sorted = uJP(sort_idx, :);
-
-fprintf('\n=== 收斂點統計 ===\n');
-for k = 1:size(uJP_sorted, 1)
-    fprintf('P%d (%.4f, %.4f): %d 個點\n', k, uJP_sorted(k,1), uJP_sorted(k,2), counts_sorted(k));
-end
-
-% 自動找出全域最低 Cost 的點
-[min_cost, min_idx] = min(C_valid);
-best_j = J_valid(min_idx);
-best_P = P_valid(min_idx);
-
-fprintf('\n=== 最佳化目標更新 ===\n');
-fprintf('全域最低 Cost = %.4f，位於 (j=%.4f, P=%.4f)\n', min_cost, best_j, best_P);
-fprintf('已將此點自動設定為後續 P scan 與診斷圖表的目標參數。\n');
-
-% 重新計算最佳參數的物理參數與動態資訊 (供後續區塊使用)
+% 重新計算最佳參數的物理參數與動態資訊
 [best_C, best_p] = paperToDimensional(best_j, best_P, basePar);
 [~, best_info] = jansen_residual_weighted( ...
     [best_j, best_P], basePar, sim, ...
     t_exp, y_data, data_features, fs, f_target, f_scale, weights, n_lock, m_lock);
 
-% 額外輸出：收斂軌跡向量圖
-figure('Color','w', 'Name', 'Initial Parameter Dependence');
+% 5.2 繪製流形與收斂軌跡圖 (Manifold & Trajectory Plot)
+figure('Color','w', 'Name', 'Manifold Tracer Trajectory');
 hold on;
-% 畫出收斂向量
-quiver(J_GRID, P_GRID, J_OPT_RES - J_GRID, P_OPT_RES - P_GRID, 0, ...
-    'Color', [0.6 0.6 0.6], 'MaxHeadSize', 0.5, 'LineWidth', 1);
-% 標示起始點與收斂終點
-scatter(J_GRID(:), P_GRID(:), 20, 'b', 'filled', 'MarkerEdgeColor', 'k');
-scatter(uJP_sorted(:,1), uJP_sorted(:,2), 80, 'r', 'p', 'filled', 'MarkerEdgeColor', 'k');
-% 特別標示全域最佳解
-scatter(best_j, best_P, 150, 'y', 'p', 'filled', 'MarkerEdgeColor', 'k', 'LineWidth', 1.5);
+
+% 1. 繪製所有探索過的最佳化落點 (用顏色表示 Cost 高低，呈現流形的谷底形狀)
+valid_plot = ~isnan(ALL_COST) & (ALL_COST < 1000);
+scatter(ALL_J_OPT(valid_plot), ALL_P_OPT(valid_plot), 15, ALL_COST(valid_plot), 'filled', 'MarkerFaceAlpha', 0.6);
+colormap('parula');
+cb = colorbar;
+cb.Label.String = 'Optimization Cost';
+
+% 2. 繪製中心點的迭代軌跡 (P1 -> P2 -> P3 ...)
+plot(center_history(:,1), center_history(:,2), 'k-', 'LineWidth', 2);
+scatter(center_history(1,1), center_history(1,2), 100, 'g', 's', 'filled', 'MarkerEdgeColor', 'k'); % 起點 P1
+scatter(center_history(end,1), center_history(end,2), 150, 'r', 'p', 'filled', 'MarkerEdgeColor', 'k'); % 終點
 
 xlabel('Connectivity Parameter (j)');
 ylabel('External Input (P)');
-title('Convergence from Different Initial Seeds');
-legend('Convergence Path', 'Initial Seeds', 'Local Minima', 'Global Best Minimum', 'Location', 'best');
+title(sprintf('Manifold Tracking: %d Iterations from P_1(12.5338, 2.6901)', N_iters));
+legend('Explored Optima (Manifold)', 'Center Trajectory', 'Start P_1', 'Final Optimum', 'Location', 'best');
 grid on; box on;
 
 %% 6. P scan
@@ -815,5 +844,18 @@ function update_waitbar(h, total_points)
         progress_msg = sprintf('平行運算進度: [%d/%d] 已完成', count, total_points);
         waitbar(count / total_points, h, progress_msg);
         drawnow; % 強制立即刷新畫面
+    end
+end
+
+function update_waitbar_tracer(h, total_points)
+    persistent count;
+    if isempty(count) || count == total_points
+        count = 0;
+    end
+    count = count + 1;
+    if isvalid(h)
+        progress_msg = sprintf('流形追蹤進度: [%d/%d] 最佳化計算已完成', count, total_points);
+        waitbar(count / total_points, h, progress_msg);
+        drawnow; 
     end
 end
