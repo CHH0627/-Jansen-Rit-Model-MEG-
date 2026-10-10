@@ -93,23 +93,24 @@ opts_mstart = optimoptions('lsqnonlin', 'Display', 'off', 'MaxIterations', 80, .
     'MaxFunctionEvaluations', 800);
 
 % --- 演算法參數設定 ---
-N_iters = 10;                  % 迭代次數 N (可自行設定)
-grid_step = 0.0001;             % 網格步長
-grid_range = -5:5;             % i 的範圍 (-5 到 5，共 11x11 = 121 個點)
+N_iters = 10;                  % 迭代次數 N
+grid_step = 0.001;             % 網格步長
+grid_range = -5:5;             % i 的範圍
 num_grid_points = length(grid_range)^2;
+total_evaluations = N_iters * num_grid_points; % 總計算點數
 
 % 初始點 P1
-current_center = [12.5338, 2.6901]; 
+current_center = [12.4648, 2.6600]; % [j,P]，可自行修改為其他起始點
 
 % 用於儲存歷史軌跡與所有探索過的點 (供繪製 Manifold 使用)
 center_history = zeros(N_iters + 1, 2);
 center_history(1, :) = current_center;
 cost_history = zeros(N_iters + 1, 1);
 
-% 儲存所有灑點的最佳化結果以繪製散佈圖
-ALL_J_OPT = [];
-ALL_P_OPT = [];
-ALL_COST  = [];
+% 預先配置繪圖用總陣列的記憶體空間，避免迴圈內動態改變大小
+ALL_J_OPT = zeros(total_evaluations, 1);
+ALL_P_OPT = zeros(total_evaluations, 1);
+ALL_COST  = zeros(total_evaluations, 1);
 
 obj_fun = @(theta_var) jansen_residual_weighted( ...
     apply_fixed_params(theta_var,fixed_paper_params),basePar,sim, ...
@@ -128,7 +129,7 @@ run_timestamp = string(datetime('now', 'Format', 'yyyy-MM-dd HH:mm:ss'));
 
 % 開始 N 次迭代
 for iter = 1:N_iters
-    fprintf('第 %d/%d 次迭代，當前中心: (j=%.4f, P=%.4f)，當前成本: %.4f\n', iter, N_iters, current_center(1), current_center(2), cost_history(iter + 1));
+    fprintf('第 %d/%d 次迭代，當前中心: (j=%.4f, P=%.4f)，當前成本: %.4f\n', iter, N_iters, current_center(1), current_center(2), cost_history(iter));
     
     % 1. 在當前中心建立 11x11 微小網格
     [dj, dP] = meshgrid(grid_range * grid_step, grid_range * grid_step);
@@ -173,12 +174,14 @@ for iter = 1:N_iters
     else
         writetable(iter_table, csv_filename);
     end
-    % =====================================================================
+
+    start_idx = (iter - 1) * num_grid_points + 1;
+    end_idx   = iter * num_grid_points;
     
-    % 紀錄所有點，用於最後 MATLAB 繪圖
-    ALL_J_OPT = [ALL_J_OPT; iter_J_opt];
-    ALL_P_OPT = [ALL_P_OPT; iter_P_opt];
-    ALL_COST  = [ALL_COST; iter_Cost];
+    % 將當次迭代的結果，直接「填入」預先分配好的陣列中
+    ALL_J_OPT(start_idx:end_idx) = iter_J_opt;
+    ALL_P_OPT(start_idx:end_idx) = iter_P_opt;
+    ALL_COST(start_idx:end_idx)  = iter_Cost;
     
     % 4. 尋找當次迭代中 Cost 最小的點作為下一次的 P2 中心
     valid_idx = ~isnan(iter_Cost) & (iter_Cost < 1000); % 濾除無效/被懲罰的點
@@ -199,6 +202,10 @@ for iter = 1:N_iters
     else
         fprintf('警告: 第 %d 次迭代的所有點皆落入懲罰區，提早終止。\n', iter);
         center_history(iter+1:end, :) = [];
+        % 若因落入懲罰區提早終止，把後面沒用到的預留空間刪除
+        ALL_J_OPT(end_idx+1:end) = [];
+        ALL_P_OPT(end_idx+1:end) = [];
+        ALL_COST(end_idx+1:end)  = [];
         break;
     end
 end
@@ -237,7 +244,7 @@ scatter(center_history(end,1), center_history(end,2), 150, 'r', 'p', 'filled', '
 
 xlabel('Connectivity Parameter (j)');
 ylabel('External Input (P)');
-title(sprintf('Manifold Tracking: %d Iterations from P_1(12.5338, 2.6901)', N_iters));
+title(sprintf('Manifold Tracking: %d Iterations from P_1', N_iters));
 legend('Explored Optima (Manifold)', 'Center Trajectory', 'Start P_1', 'Final Optimum', 'Location', 'best');
 grid on; box on;
 
