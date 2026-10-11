@@ -94,13 +94,13 @@ opts_mstart = optimoptions('lsqnonlin', 'Display', 'off', 'MaxIterations', 80, .
 
 % --- 演算法參數設定 ---
 N_iters = 10;                  % 迭代次數 N
-grid_step = 0.001;             % 網格步長
+grid_step = 0.0001;             % 網格步長
 grid_range = -5:5;             % i 的範圍
 num_grid_points = length(grid_range)^2;
 total_evaluations = N_iters * num_grid_points; % 總計算點數
 
 % 初始點 P1
-current_center = [12.4648, 2.6600]; % [j,P]，可自行修改為其他起始點
+current_center = [12.4033, 2.6144]; % [j,P]，可自行修改為其他起始點
 
 % 用於儲存歷史軌跡與所有探索過的點 (供繪製 Manifold 使用)
 center_history = zeros(N_iters + 1, 2);
@@ -186,7 +186,6 @@ for iter = 1:N_iters
     % 4. 尋找當次迭代中 Cost 最小的點作為下一次的 P2 中心
     valid_idx = ~isnan(iter_Cost) & (iter_Cost < 1000); % 濾除無效/被懲罰的點
     
-    
     if any(valid_idx)
         valid_costs = iter_Cost(valid_idx);
         valid_J = iter_J_opt(valid_idx);
@@ -195,10 +194,29 @@ for iter = 1:N_iters
         [min_c, min_idx] = min(valid_costs);
         next_center = [valid_J(min_idx), valid_P(min_idx)];
         
+        % 檢查本次與上次的中心點差異，若極為相近則判定收斂並提前結束
+        dist_to_prev = norm(next_center - current_center);
+        convergence_tol = 1e-6; % 設定收斂的容忍度，可依需求調整
+        
         % 更新中心點與歷史紀錄
         current_center = next_center;
         center_history(iter + 1, :) = current_center;
         cost_history(iter + 1) = min_c;
+        
+        if dist_to_prev < convergence_tol
+            fprintf('\n>>> 提前收斂：本次最佳點與上次相同 (差異 < %g)，流形追蹤提早結束！\n', convergence_tol);
+            
+            % 刪除歷史紀錄中多餘的 0
+            center_history(iter+2:end, :) = [];
+            cost_history(iter+2:end) = [];
+            
+            % 刪除 ALL_* 陣列中多留的空白記憶體
+            ALL_J_OPT(end_idx+1:end) = [];
+            ALL_P_OPT(end_idx+1:end) = [];
+            ALL_COST(end_idx+1:end)  = [];
+            break; % 跳出迭代迴圈
+        end
+        
     else
         fprintf('警告: 第 %d 次迭代的所有點皆落入懲罰區，提早終止。\n', iter);
         center_history(iter+1:end, :) = [];
