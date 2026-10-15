@@ -101,6 +101,7 @@ total_evaluations = N_iters * num_grid_points; % 總計算點數
 
 % 初始點 P1
 current_center = [12.1, 2]; % [j,P]，可自行修改為其他起始點
+% j = 2.10 ~ 2.38, P= FLC ~ H3
 
 csv_filename = sprintf('Manifold_Tracer_Results_j%.4f_P%.4f.csv', ...
     current_center(1), current_center(2));
