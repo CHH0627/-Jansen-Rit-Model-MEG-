@@ -93,14 +93,17 @@ opts_mstart = optimoptions('lsqnonlin', 'Display', 'off', 'MaxIterations', 80, .
     'MaxFunctionEvaluations', 800);
 
 % --- 演算法參數設定 ---
-N_iters = 10;                  % 迭代次數 N
-grid_step = 0.0001;             % 網格步長
+N_iters = 1000;                % 迭代次數 N
+grid_step = 0.0001;            % 網格步長
 grid_range = -5:5;             % i 的範圍
 num_grid_points = length(grid_range)^2;
 total_evaluations = N_iters * num_grid_points; % 總計算點數
 
 % 初始點 P1
-current_center = [12.4033, 2.6144]; % [j,P]，可自行修改為其他起始點
+current_center = [12.1, 2]; % [j,P]，可自行修改為其他起始點
+
+csv_filename = sprintf('Manifold_Tracer_Results_j%.4f_P%.4f.csv', ...
+    current_center(1), current_center(2));
 
 % 用於儲存歷史軌跡與所有探索過的點 (供繪製 Manifold 使用)
 center_history = zeros(N_iters + 1, 2);
@@ -117,6 +120,7 @@ obj_fun = @(theta_var) jansen_residual_weighted( ...
     t_exp, y_data, data_features, fs, f_target, f_scale, weights, n_lock, m_lock);
 
 fprintf('\n=== 開始流形軌跡追蹤 (共 %d 次迭代，每次 %d 個點) ===\n', N_iters, num_grid_points);
+fprintf('結果將儲存至檔案: %s\n', csv_filename);
 
 % 建立進度條
 h_wait = waitbar(0, '正在沿著 Manifold 尋找最佳解...');
@@ -130,17 +134,17 @@ run_timestamp = string(datetime('now', 'Format', 'yyyy-MM-dd HH:mm:ss'));
 % 開始 N 次迭代
 for iter = 1:N_iters
     fprintf('第 %d/%d 次迭代，當前中心: (j=%.4f, P=%.4f)，當前成本: %.4f\n', iter, N_iters, current_center(1), current_center(2), cost_history(iter));
-    
+
     % 1. 在當前中心建立 11x11 微小網格
     [dj, dP] = meshgrid(grid_range * grid_step, grid_range * grid_step);
     J_seeds = current_center(1) + dj(:);
     P_seeds = current_center(2) + dP(:);
-    
+
     % 暫存當次迭代的結果
     iter_J_opt = zeros(num_grid_points, 1);
     iter_P_opt = zeros(num_grid_points, 1);
     iter_Cost  = zeros(num_grid_points, 1);
-    
+
     % 2. 使用 parfor 平行最佳化這 121 個點
     parfor k = 1:num_grid_points
         theta0_var = [J_seeds(k), P_seeds(k)];
@@ -154,20 +158,18 @@ for iter = 1:N_iters
         end
         send(D, 1); % 更新進度條
     end
-    
+
     % =====================================================================
-    % 3. 將當次迭代的所有點匯出並附加到 CSV 檔案 (Append Mode)
+    % 3. 將當次迭代的所有點匯出並附加到以初始點命名的 CSV 檔案 (Append Mode)
     % =====================================================================
     % 建立與數據點數量相同的迭代次數與時間陣列
     iter_array = repmat(iter, num_grid_points, 1);
     time_array = repmat(run_timestamp, num_grid_points, 1);
-    
+
     % 建立資料表 (Table)，包含所有要求輸出的數據
     iter_table = table(time_array, iter_array, J_seeds, P_seeds, iter_J_opt, iter_P_opt, iter_Cost, ...
         'VariableNames', {'RunTime', 'Iteration', 'j_Initial', 'P_Initial', 'j_Optimized', 'P_Optimized', 'Cost'});
-    
-    csv_filename = 'Manifold_Tracer_Results.csv';
-    
+
     % 偵測檔案是否存在：不存在就新建(自動寫入標題)，存在就以附加模式(Append)寫在舊資料下方
     if exist(csv_filename, 'file')
         writetable(iter_table, csv_filename, 'WriteMode', 'append');
@@ -177,46 +179,46 @@ for iter = 1:N_iters
 
     start_idx = (iter - 1) * num_grid_points + 1;
     end_idx   = iter * num_grid_points;
-    
+
     % 將當次迭代的結果，直接「填入」預先分配好的陣列中
     ALL_J_OPT(start_idx:end_idx) = iter_J_opt;
     ALL_P_OPT(start_idx:end_idx) = iter_P_opt;
     ALL_COST(start_idx:end_idx)  = iter_Cost;
-    
+
     % 4. 尋找當次迭代中 Cost 最小的點作為下一次的 P2 中心
     valid_idx = ~isnan(iter_Cost) & (iter_Cost < 1000); % 濾除無效/被懲罰的點
-    
+
     if any(valid_idx)
         valid_costs = iter_Cost(valid_idx);
         valid_J = iter_J_opt(valid_idx);
         valid_P = iter_P_opt(valid_idx);
-        
+
         [min_c, min_idx] = min(valid_costs);
         next_center = [valid_J(min_idx), valid_P(min_idx)];
-        
+
         % 檢查本次與上次的中心點差異，若極為相近則判定收斂並提前結束
         dist_to_prev = norm(next_center - current_center);
         convergence_tol = 1e-6; % 設定收斂的容忍度，可依需求調整
-        
+
         % 更新中心點與歷史紀錄
         current_center = next_center;
         center_history(iter + 1, :) = current_center;
         cost_history(iter + 1) = min_c;
-        
+
         if dist_to_prev < convergence_tol
             fprintf('\n>>> 提前收斂：本次最佳點與上次相同 (差異 < %g)，流形追蹤提早結束！\n', convergence_tol);
-            
+
             % 刪除歷史紀錄中多餘的 0
             center_history(iter+2:end, :) = [];
             cost_history(iter+2:end) = [];
-            
+
             % 刪除 ALL_* 陣列中多留的空白記憶體
             ALL_J_OPT(end_idx+1:end) = [];
             ALL_P_OPT(end_idx+1:end) = [];
             ALL_COST(end_idx+1:end)  = [];
             break; % 跳出迭代迴圈
         end
-        
+
     else
         fprintf('警告: 第 %d 次迭代的所有點皆落入懲罰區，提早終止。\n', iter);
         center_history(iter+1:end, :) = [];
@@ -262,7 +264,7 @@ scatter(center_history(end,1), center_history(end,2), 150, 'r', 'p', 'filled', '
 
 xlabel('Connectivity Parameter (j)');
 ylabel('External Input (P)');
-title(sprintf('Manifold Tracking: %d Iterations from P_1', N_iters));
+title(sprintf('Manifold Tracking from P_1(%.4f, %.4f)', center_history(1,1), center_history(1,2)));
 legend('Explored Optima (Manifold)', 'Center Trajectory', 'Start P_1', 'Final Optimum', 'Location', 'best');
 grid on; box on;
 
